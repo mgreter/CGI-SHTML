@@ -1,8 +1,8 @@
-$VERSION = "1.27";
+$VERSION = "1.29";
 package CGI::SHTML;
-our $VERSION = "1.27";
+our $VERSION = "1.29";
 
-# -*- Perl -*-		# Thu May 06 10:55:42 CDT 2004 
+# -*- Perl -*-		Wed May 19 13:09:58 CDT 2004 
 #############################################################################
 # Written by Tim Skirvin <tskirvin@ks.uiuc.edu>
 # Copyright 2001-2004, Tim Skirvin and UIUC Board of Trustees.  
@@ -125,7 +125,7 @@ printing.  All of the work is actually done by C<ssi()>.
 
 sub parse_shtml {
   my ($self, @lines) = @_;
-  map { chomp } @lines; my $line = join(" ", @lines); 
+  map { chomp } @lines; my $line = join("\n", @lines); 
   my @parts = split m/(<!--#.*?-->)/s, $line;
 
   my @return; 
@@ -330,7 +330,7 @@ sub _file {
 # secure as we'd like it to be...
 sub _execute {
   my ($self, $cmd) = @_;
-  delete @ENV{qw(IFS CDPATH ENV BASH_ENV PATH)};
+  foreach (qw( IFS CDPATH ENV BASH_ENV PATH ) ) { $ENV{$_} = ""; }
   my ($command) = $cmd =~ /^(.*)$/;	# Not particularly secure
   open ( COMMAND, "$command |" ) or warn "Couldn't open $command\n";
   my @list = <COMMAND>;
@@ -482,3 +482,8 @@ Tim Skirvin <tskirvin@ks.uiuc.edu>.
 # v1.27		Thu May 06 10:52:32 CDT 2004 
 ### Added if/elif/else/endif functionality.  This was challenging.
 ### Documentation chanes came with it.
+# v1.28		Mon May 17 15:15:22 CDT 2004 
+### Put back old environment variables after an execute.
+# v1.28		Wed May 19 11:37:06 CDT 2004 
+### Parsing information is accurate again with parse_shtml - doesn't lose
+### newlines.  Setting blank versions of those environment variables.

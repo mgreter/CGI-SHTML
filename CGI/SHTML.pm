@@ -1,8 +1,8 @@
-$VERSION = "1.26";
+$VERSION = "1.27";
 package CGI::SHTML;
-our $VERSION = "1.26";
+our $VERSION = "1.27";
 
-# -*- Perl -*-		# Thu Apr 22 14:45:41 CDT 2004 
+# -*- Perl -*-		# Thu May 06 10:55:42 CDT 2004 
 #############################################################################
 # Written by Tim Skirvin <tskirvin@ks.uiuc.edu>
 # Copyright 2001-2004, Tim Skirvin and UIUC Board of Trustees.  
@@ -41,6 +41,9 @@ In order to parse SSI, you generally have to configure your scripts to be
 re-parsed through Apache itself.  This module eliminates that need by
 parsing SSI headers itself, as best it can.   
 
+Some information on SSI is available at
+B<http://www.cclabs.missouri.edu/things/instruction/www/html/xssi.shtml>.
+
 =head2 VARIABLES
 
 =over 2
@@ -60,7 +63,9 @@ make any difference; it's loaded when you load the module.
 use strict;
 use Time::Local;
 use CGI;
+use warnings;
 use vars qw( @ISA $EMPTY $ROOTDIR %REPLACE %CONFIG %HEADER %FOOTER $CONFIG );
+use vars qw( $IF $NOPRINT );
 
 ### User Defined Variables ####################################################
 $CONFIG	 ||= "/home/webserver/conf/shtml.pm";
@@ -89,11 +94,26 @@ delete $ENV{'PATH'};
 
 @ISA = "CGI";
 
-if ( -r $CONFIG ) { warn "Running $CONFIG\n"; do $CONFIG } 
+if ( -r $CONFIG ) { do $CONFIG } 
 
 =head2 SUBROUTINES 
 
 =over 2
+
+=item new ()
+
+Invokes CGI's new() command, but blesses with the local class.  Also
+performs the various local functions that are necessary.
+
+=cut
+
+sub new { 
+  my $item = CGI::new(@_); 
+  $$item{'NOPRINT'} = [];  
+  $$item{'IFDONE'} = [];  
+  $$item{'IF'} = 0;
+  bless $item, shift; $item; 
+}
 
 =item parse_shtml ( LINE [, LINE [, LINE ]] )
 
@@ -105,8 +125,38 @@ printing.  All of the work is actually done by C<ssi()>.
 
 sub parse_shtml {
   my ($self, @lines) = @_;
-  map { s%<!--\#(\w+)\s+(.*)\s*-->% $self->ssi($1, $2) || "" %egx } @lines;
-  wantarray ? @lines : join("\n", @lines);
+  map { chomp } @lines; my $line = join(" ", @lines); 
+  my @parts = split m/(<!--#.*?-->)/s, $line;
+
+  my @return; 
+  while (@parts) { 
+    my @ssi = ();
+    my $text = shift @parts || "";
+    unless ($self->_noprint) {
+      push @return, $text   if defined $text && $text ne '';
+    }
+    if (scalar @parts && $parts[0] =~ /^<!--#(\w+)\s*(.*)?-->\s*$/m) {
+      @ssi = ($1, $2); shift @parts;
+    } 
+    my $ssival = $ssi[0] ? $self->ssi(@ssi) : undef;
+    unless ($self->_noprint) {
+      push @return, $ssival if defined $ssival && $ssival ne '';
+    }
+  }
+
+  my $final = join("\n", @return);
+  $final;
+}
+
+sub _ifdone  { shift->_arrayset('IFDONE', @_) }
+sub _noprint { shift->_arrayset('NOPRINT', @_) }
+
+sub _arrayset {
+  my ($self, $key, $val) = @_;
+  my $array = $$self{$key};
+  my $if = $$self{'IF'} - 1;
+  if (defined $val) { $$array[$if] = $val }
+  $$array[$if] || 0;
 }
 
 =item ssi ( COMMAND, ARGS )
@@ -118,22 +168,48 @@ C<ARGS> is a string containing the rest of the SSI command - it is parsed
 by this function.
 
 Note: not all commands are implemented.  In fact, all that is implemented
-is 'echo', 'include', 'fsize', 'flastmod', 'exec', and 'set'.  These are
-all the ones that I've actually had to use to this point.
+is 'echo', 'include', 'fsize', 'flastmod', 'exec', 'if/elif/else/endif',
+and 'set'.  These are all the ones that I've actually had to use to this
+point.
 
 =cut
 
 sub ssi {
   my ($self, $command, $args) = @_;
-  my %hash;
+  my %hash = ();
 
   while ($args) { 		# Parse $args
-    $args =~ s%^(\w+)=(\"[^\"]*\"|'.*'|\S+)\s*%%;
+    $args =~ s/^(\w+)=(\"[^\"]*\"|'.*'|\S+)\s*//;
     last unless defined($1);
     my $item = lc $1; my $val = $2;  
-    $val =~ s%^\"|\"$%%g; 
+    $val =~ s/^\"|\"$//g; 
     $hash{$item} = $val if defined($val); 
   }
+
+  my $orig = $self->_noprint;
+  my $if = $$self{'IF'};
+  if (lc $command eq 'if' or lc $command eq 'elif') {
+    if (lc $command eq 'if') { $$self{'IF'}++;  $if = $$self{'IF'}; }
+    if ($self->_ifdone) { $self->_noprint(1); return "" }
+    my $val = _ssieval(\%hash);
+    if ($val) { $self->_noprint(0); $self->_ifdone(1); }
+    else      { $self->_noprint(1); }
+  
+    my $noprint = $self->_noprint;
+    return "";
+
+  } elsif (lc $command eq 'else') { 
+    if ($self->_ifdone) { $self->_noprint(1); } 
+    else               { $self->_noprint(0); $self->_ifdone(1); }
+    my $noprint = $self->_noprint;
+    return "";
+
+  } elsif (lc $command eq 'endif') { 
+    my $noprint = $self->_noprint(0);
+    my $ifdone  = $self->_ifdone(0);
+    $$self{'IF'}--;
+    return "";
+  } 
 
   if (lc $command eq 'include') {
     if ( defined $hash{'virtual'} ) { $self->_file(_vfile( $hash{'virtual'} )) }
@@ -144,8 +220,9 @@ sub ssi {
     my $value = $hash{'value'} || ""; 
     $value =~ s/\{(.*)\}/$1/g;
     $value =~ s/^\$(\S+)/$ENV{$1} || $EMPTY/egx;
-    $ENV{$var} = $value; return "";
-  # Should do something with "config"
+    $ENV{$var} = $value;
+    # Should do something with "config"
+    return "";
   } elsif (lc $command eq 'echo') {
     $hash{'var'} =~ s/\{(.*)\}/$1/g;
     return $ENV{$hash{'var'}} || $EMPTY;
@@ -161,8 +238,7 @@ sub ssi {
     if (defined $hash{'virtual'})  { $self->_flastmod(_vfile($hash{'virtual'}))}
     elsif ( defined $hash{'file'}) { $self->_flastmod( $hash{'file'} ) }
     else { return "No filename offered" };
-  } 
-  return "";
+  } else { return "" } 
 }
 
 =item start_html ( TYPE, OPTIONS )
@@ -204,12 +280,24 @@ sub end_html {
   join("\n", $self->parse_shtml($command), CGI->end_html(\%hash));
 }
 
+=back
+
+=cut
+
+###############################################################################
+### Internal Functions ########################################################
+###############################################################################
+
 ### _vfile ( FILENAME )
 # Gets the virtual filename out of FILENAME, based on ROOTDIR.  Also
 # performs the substitutions in C<REPLACE>.
 
 sub _vfile {
   my $filename = shift || return undef;
+
+  # If it starts with a '$' sign, then get the value out first
+  if ($filename =~ /^\$\{?(\S+)\}?$/) { $filename = $ENV{$1} || ""; }
+
   my $hostname = $ENV{'HTTP_HOST'} || $ENV{'HOSTNAME'};  
   foreach my $replace (keys %REPLACE) {
     next if ($hostname =~ /^www/);	# Hack 
@@ -271,7 +359,29 @@ sub _fsize    {
   }
 }
 
-=back
+## _ssieval( HASHREF )
+# Evaluates the expression with 'var' or 'expr'.  Meant for use with
+# if/elif clauses.  This actually more-or-less works!  It's also very
+# dangerous, though, since it uses 'eval'.  Then again, given that we're
+# already giving the user the capacity to invoke random pieces of code,
+# it's not realy that much of a stretch...
+sub _ssieval { 
+  my $hash = shift;
+  if (my $var  = $$hash{'var'})  { return $var ? 1 : 0 }
+  if (my $eval = $$hash{'expr'}) { 
+    $eval =~ s/\s*\$(?:\{(\S+?)\}|(\S+?))\s*
+	      / join('', "'", $ENV{$1 || $2} || "", "'" ) /egx;
+    my $val = eval($eval);
+    return $val ? 1 : 0;	# Need to do more here.
+  }
+  0
+}
+
+1;
+
+###############################################################################
+### Further Documentation #####################################################
+###############################################################################
 
 =head1 NOTES
 
@@ -293,25 +403,37 @@ Also of note is that this has been designed for use so that if headers and
 footers are not being included, you can generally fall back to the default
 CGI.pm fairly easily enough.
 
+Also of note are the security issues.  There are lots of ways for the user
+to run arbitrary code with this module; however, there were already plenty
+of ways for them to do it if you're giving them unfettered SSI access.
+This isn't a change.  So make sure that the user that your webserver runs
+as isn't a particularly priveleged user, and *never* run code through this
+that came from the outside!  You would be a fool to do otherwise.
+
 =head1 SEE ALSO
 
 C<CGI.pm>
 
 =head1 TODO
 
-Implement the rest of the SSI functions.  It might be nice to make this
-more object-oriented as well; as it stands this wouldn't stand a chance
-with mod_perl.
+There are still a few functions that should be better implemented (format
+strings for flastmod(), for instance).  It might be nice to make this more
+object-oriented as well; as it stands this wouldn't stand a chance with
+mod_perl.
 
 =head1 AUTHOR
 
-Written by Tim Skirvin <tskirvin@ks.uiuc.edu>
+Tim Skirvin <tskirvin@ks.uiuc.edu>
+
+=head1 HOMEPAGE
+
+B<http://www.ks.uiuc.edu/Development/MDTools/cgi-shtml/>
 
 =head1 LICENSE
 
 This code is distributed under the University of Illinois Open Source
 License.  See
-C<http://www.ks.uiuc.edu/Development/MDTools/uiuclicense.html> for
+B<http://www.ks.uiuc.edu/Development/MDTools/uiuclicense.html> for
 details.
 
 =head1 COPYRIGHT
@@ -355,5 +477,8 @@ Tim Skirvin <tskirvin@ks.uiuc.edu>.
 ### in 'default' values in the headers/footers
 # v1.26		Thu Apr 22 15:00:51 CDT 2004 
 ### Making fsize(), flastmod(), etc into internal functions.  
-
-1;
+# v1.26.01	Thu Apr 22 23:32:57 CDT 2004 
+### Forgot to turn off some debugging information.
+# v1.27		Thu May 06 10:52:32 CDT 2004 
+### Added if/elif/else/endif functionality.  This was challenging.
+### Documentation chanes came with it.

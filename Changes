@@ -1,4 +1,9 @@
 Revision history for Perl extension CGI::SHTML
 
+1.27		Thu May 06 11:16:06 CDT 2004 
+	- Added if/elif/else/endif functionality.
+	- Minor bugfixes
+	- Code cleanup, documentation cleanup.
+
 1.26		Thu Apr 22 15:14:12 CDT 2004 
 	- First version ready for some kind of distribution.

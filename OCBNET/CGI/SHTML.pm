@@ -1,12 +1,15 @@
-$VERSION = "1.29";
+$VERSION = "1.29.1";
 package OCBNET::CGI::SHTML;
-our $VERSION = "1.29";
+our $VERSION = "1.29.1";
 
 # -*- Perl -*-		Wed May 19 13:09:58 CDT 2004
 #############################################################################
 # Written by Tim Skirvin <tskirvin@ks.uiuc.edu>
 # Copyright 2001-2004, Tim Skirvin and UIUC Board of Trustees.
 # Redistribution terms are below.
+#############################################################################
+# Shamelessly coped and extended by Marcel Greter
+# Original lincense does apply to all changes
 #############################################################################
 
 =head1 NAME
@@ -123,10 +126,16 @@ printing.  All of the work is actually done by C<ssi()>.
 
 =cut
 
+my $rec = 0;
+
 sub parse_shtml {
   my ($self, @lines) = @_;
+  # return if scalar @_ < 2;
+  # @lines = grep { defined } @lines;
+  # return if scalar @lines == 0;
   map { chomp } @lines; my $line = join("\n", @lines);
   my @parts = split m/(<!--#.*?-->)/s, $line;
+  return "[SSI recursion limit execed]" if ++$rec > 15;
 
   my @return;
   while (@parts) {
@@ -144,7 +153,11 @@ sub parse_shtml {
     }
   }
 
-  my $final = join("\n", @return);
+  my $final = join("", @return);
+  # trim inserts for prettier result
+  $final =~ s/\A(?:\s*[\n\r])+\s*//g;
+  $final =~ s/\s*(?:[\n\r]\s*)+\z//g;
+  -- $rec;
   $final;
 }
 
@@ -212,8 +225,9 @@ sub ssi {
   }
 
   if (lc $command eq 'include') {
-    if ( defined $hash{'virtual'} ) { $self->_file(_vfile( $hash{'virtual'} )) }
-    elsif ( defined $hash{'file'} ) { $self->_file( $hash{'file'} ) }
+    # pass hash so we can get additional options inside file function
+    if ( defined $hash{'virtual'} ) { $self->_file(_vfile( $hash{'virtual'} ), \%hash) }
+    elsif ( defined $hash{'file'} ) { $self->_file( $hash{'file'}, \%hash ) }
     else { return "No filename offered" };
   } elsif (lc $command eq 'set') {
     my $var = $hash{'var'} || return "No variable to set";
@@ -292,6 +306,8 @@ sub end_html {
 # Gets the virtual filename out of FILENAME, based on ROOTDIR.  Also
 # performs the substitutions in C<REPLACE>.
 
+# "virtual" specifies the target relative to the domain root
+
 sub _vfile {
   my $filename = shift || return undef;
 
@@ -307,22 +323,49 @@ sub _vfile {
   if ($filename =~ m%^~(\w+)/(.*)$%) { $newname = "/home/$1/public_html/$2"; }
   elsif ( $filename =~ m%^[^/]% ) {
     my ($directory, $program) = $0 =~ m%^(.*)/(.*)$%;
-    $newname = "$directory/$filename"
+    $newname = "$ENV{'DOCUMENT_ROOT'}/$filename"
   }
-  else { $newname = "$ROOTDIR/$filename" }
+  else { $newname = "$ENV{'DOCUMENT_ROOT'}/$filename" }
   $newname =~ s%/+%/%g;  # Remove doubled-up /'s
   $newname;
 }
 
 ## _file( FILE )
 # Open a file and parse it with parse_shtml().
+# "file" specifies the path relative to the directory of the current file
 sub _file {
-  my ($self, $file) = @_;
-  open( FILE, "<$file" ) or warn "Couldn't open $file: $!\n" && return "";
-  my @list = <FILE>;
-  close (FILE);
+  use IO::HTML qw(html_file_and_encoding);
+  my ($self, $file, $hash) = @_;
+  # guess the encoding of the included html file
+  my ($fh, $enc, $bom) = eval { html_file_and_encoding($file) }
+    or warn "Couldn't open $file: $!\n"
+       && return "[SSI error - could not open file: $file]";
+  print "SSI-Inc with encoding charset: $enc\n" if $self->{'debug'};
+  my @list = <$fh>;
+  close ($fh);
   map { chomp } @list;
-  return $self->parse_shtml(@list);
+  if ($hash->{'dom'}) {
+    local $_;
+    require pQuery;
+    my $dom = $hash->{'dom'};
+    my $pQuery = pQuery(join("\n", @list));
+    return "[pQuery could not parse DOM (error)]" unless $pQuery;
+    return "[pQuery could not parse DOM]" unless $pQuery->length;
+    my $node = $pQuery->find($dom) if $pQuery;
+    return "[DOM node not found (error)]" unless $node;
+    return "[DOM node not found]" unless $node->length;
+    @list = ($node->html) if $node;
+  }
+
+  # concat the fill response code
+  my $data = join("\n", @list);
+  # apply some minimalistic templating
+  # ToDo: this should be done properly
+  $data =~ s/\$\{([a-zA-Z0-9]+)(?:\s*\|\|\s*(.*?)\s*)?\}/
+    exists $hash->{$1} ? $hash->{$1} : $2
+  /egx;
+  # get just a certain node, remove others
+  return $self->parse_shtml($data);
 }
 
 ## _execute( CMD )
@@ -330,13 +373,18 @@ sub _file {
 # secure as we'd like it to be...
 sub _execute {
   my ($self, $cmd) = @_;
-  foreach (qw( IFS CDPATH ENV BASH_ENV PATH ) ) { $ENV{$_} = ""; }
+  $cmd =~ s/\//\\/g if $^O eq 'MSWin32';
+  local %ENV = %ENV;
+  # foreach (qw( IFS CDPATH ENV BASH_ENV PATH ) ) { $ENV{$_} = ""; }
   my ($command) = $cmd =~ /^(.*)$/;	# Not particularly secure
-  open ( COMMAND, "$command |" ) or warn "Couldn't open $command\n";
+  eval {
+    open ( COMMAND, "\"$command\" |" ) or warn "Couldn't open $command: $!\n";
+  };
   my @list = <COMMAND>;
   close (COMMAND);
   map { chomp } @list;
-  return "" unless scalar(@list) > 0;	# Didn't return anything
+  $! = undef;
+  return undef unless scalar(@list) > 0;	# Didn't return anything
   # Take out the "Content-type:" part, if it's a CGI - note, THIS IS A HACK
   if ( scalar(@list) > 1 && $list[0] =~ /^Content-type: (.*)$/i) {
     shift @list;  shift @list;
@@ -487,3 +535,12 @@ Tim Skirvin <tskirvin@ks.uiuc.edu>.
 # v1.28		Wed May 19 11:37:06 CDT 2004
 ### Parsing information is accurate again with parse_shtml - doesn't lose
 ### newlines.  Setting blank versions of those environment variables.
+###############################################################################
+# Extensions - Dez 03 2014
+# - Add recursion limit
+# - Trim inserted ssi data
+# - Add pQuery to insert dom nodes
+# - Normalize encoding for includes
+# - Add very minimalistic templating
+# https://github.com/mgreter/CGI-SHTML
+###############################################################################

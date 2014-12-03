@@ -1,5 +1,5 @@
 Changes
 Makefile.PL
 MANIFEST
-CGI/SHTML.pm
+OCBNET/CGI/SHTML.pm
 test.pl
